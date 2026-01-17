@@ -13,6 +13,62 @@
         "requested": "[1.2.39, )",
         "resolved": "1.2.39",
         "contentHash": "fcFN01tDTIQqDuTwr1jUQK/geofiwjG5DycJQOnC72i1SsLAk1ELe+apBOuZ11UMQG8YKFZG1FgvjZPbqHyatg=="
+      },
+      "Microsoft.Windows.CsWin32": {
+        "type": "Direct",
+        "requested": "[0.3.264, )",
+        "resolved": "0.3.264",
+        "contentHash": "vZdu+mekst7MgpRwjE3sDUgVGQOfnl7YelRfeeaZKxA/Zdx8+EDe6GhpQh08Pjzo1Jqx9Dd596GzWMQwAoDYMA==",
+        "dependencies": {
+          "Microsoft.Windows.SDK.Win32Docs": "0.1.42-alpha",
+          "Microsoft.Windows.SDK.Win32Metadata": "68.0.4-preview",
+          "Microsoft.Windows.WDK.Win32Metadata": "0.13.25-experimental"
+        }
+      },
+      "System.Memory": {
+        "type": "Direct",
+        "requested": "[4.6.3, )",
+        "resolved": "4.6.3",
+        "contentHash": "qdcDOgnFZY40+Q9876JUHnlHu7bosOHX8XISRoH94fwk6hgaeQGSgfZd8srWRZNt5bV9ZW2TljcegDNxsf+96A=="
+      },
+      "System.Runtime.CompilerServices.Unsafe": {
+        "type": "Direct",
+        "requested": "[6.1.2, )",
+        "resolved": "6.1.2",
+        "contentHash": "2hBr6zdbIBTDE3EhK7NSVNdX58uTK6iHW/P/Axmm9sl1xoGSLqDvMtpecn226TNwHByFokYwJmt/aQQNlO5CRw=="
+      },
+      "Unscrambler.XIV": {
+        "type": "Direct",
+        "requested": "[7.40.2, )",
+        "resolved": "7.40.2",
+        "contentHash": "fUqy+vAB5sscbBhKETPSaeP4ieWTD7GhrRuzSlX/tmIhaOlB72KLQFvj65VonVYJSEbnlyYNIJXq7srRi1rA+Q=="
+      },
+      "Microsoft.Windows.SDK.Win32Docs": {
+        "type": "Transitive",
+        "resolved": "0.1.42-alpha",
+        "contentHash": "Z/9po23gUA9aoukirh2ItMU2ZS9++Js9Gdds9fu5yuMojDrmArvY2y+tq9985tR3cxFxpZO1O35Wjfo0khj5HA=="
+      },
+      "Microsoft.Windows.SDK.Win32Metadata": {
+        "type": "Transitive",
+        "resolved": "68.0.4-preview",
+        "contentHash": "66nqCLxvJfCKRpZDaKxbSsrn1R5Y9vHSHwpivnhJbCc38+B9FgE3RoJUQGgGhtXlU4+oJdcexCyat1w0cWnnPg=="
+      },
+      "Microsoft.Windows.WDK.Win32Metadata": {
+        "type": "Transitive",
+        "resolved": "0.13.25-experimental",
+        "contentHash": "IM50tb/+UIwBr9FMr6ZKcZjCMW+Axo6NjGqKxgjUfyCY8dRnYUfrJEXxAaXoWtYP4X8EmASmC1Jtwh4XucseZg==",
+        "dependencies": {
+          "Microsoft.Windows.SDK.Win32Metadata": "63.0.31-preview"
+        }
+      },
+      "machina": {
+        "type": "Project"
+      },
+      "machina.ffxiv": {
+        "type": "Project",
+        "dependencies": {
+          "Machina": "[2.3.1.3, )"
+        }
       }
     }
   }

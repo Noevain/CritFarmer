@@ -1,45 +1,57 @@
-﻿using Dalamud.Game.Command;
+using Dalamud.Bindings.ImGui;
+using Dalamud.Game.Command;
+using Dalamud.Interface.Windowing;
 using Dalamud.IoC;
 using Dalamud.Plugin;
-using System.IO;
-using Dalamud.Interface.Windowing;
 using Dalamud.Plugin.Services;
+using SamplePlugin.Parser;
+using SamplePlugin.Parsers;
+using SamplePlugin.Providers;
 using SamplePlugin.Windows;
+using System.IO;
+using System.Reflection;
+using System.Runtime.InteropServices;
+using Unscrambler.Constants;
+using static FFXIVClientStructs.ThisAssembly.Git;
 
 namespace SamplePlugin;
 
 public sealed class Plugin : IDalamudPlugin
 {
     [PluginService] internal static IDalamudPluginInterface PluginInterface { get; private set; } = null!;
-    [PluginService] internal static ITextureProvider TextureProvider { get; private set; } = null!;
-    [PluginService] internal static ICommandManager CommandManager { get; private set; } = null!;
-    [PluginService] internal static IClientState ClientState { get; private set; } = null!;
-    [PluginService] internal static IPlayerState PlayerState { get; private set; } = null!;
-    [PluginService] internal static IDataManager DataManager { get; private set; } = null!;
-    [PluginService] internal static IPluginLog Log { get; private set; } = null!;
 
     private const string CommandName = "/pmycommand";
-
     public Configuration Configuration { get; init; }
 
     public readonly WindowSystem WindowSystem = new("SamplePlugin");
     private ConfigWindow ConfigWindow { get; init; }
     private MainWindow MainWindow { get; init; }
 
+    private ParsingWindow ParsingWindow { get; init; }
+
+    public readonly PacketHandlersHooks packetHandlersHooks;
+    public readonly DamageParser parser = null!;
+    //public ZoneDownHookManager ZoneDownHooks { get; }
     public Plugin()
     {
+        Service.Initialize(PluginInterface);
         Configuration = PluginInterface.GetPluginConfig() as Configuration ?? new Configuration();
 
         // You might normally want to embed resources and load them from the manifest stream
         var goatImagePath = Path.Combine(PluginInterface.AssemblyLocation.Directory?.FullName!, "goat.png");
 
+        Service.Log.Verbose("Initializing Packet Handlers hooks...");
+        packetHandlersHooks = new PacketHandlersHooks();
+        Service.Log.Verbose("Initializing Parsing module...");
+        parser = new DamageParser(packetHandlersHooks,Configuration);
+
         ConfigWindow = new ConfigWindow(this);
         MainWindow = new MainWindow(this, goatImagePath);
-
+        ParsingWindow = new ParsingWindow(parser,Configuration);
         WindowSystem.AddWindow(ConfigWindow);
         WindowSystem.AddWindow(MainWindow);
-
-        CommandManager.AddHandler(CommandName, new CommandInfo(OnCommand)
+        WindowSystem.AddWindow(ParsingWindow);
+        Service.CommandManager.AddHandler(CommandName, new CommandInfo(OnCommand)
         {
             HelpMessage = "A useful message to display in /xlhelp"
         });
@@ -57,9 +69,9 @@ public sealed class Plugin : IDalamudPlugin
         // Add a simple message to the log with level set to information
         // Use /xllog to open the log window in-game
         // Example Output: 00:57:54.959 | INF | [SamplePlugin] ===A cool log message from Sample Plugin===
-        Log.Information($"===A cool log message from {PluginInterface.Manifest.Name}===");
-    }
 
+
+    }
     public void Dispose()
     {
         // Unregister all actions to not leak anything during disposal of plugin
@@ -67,12 +79,17 @@ public sealed class Plugin : IDalamudPlugin
         PluginInterface.UiBuilder.OpenConfigUi -= ToggleConfigUi;
         PluginInterface.UiBuilder.OpenMainUi -= ToggleMainUi;
         
+
+
         WindowSystem.RemoveAllWindows();
 
         ConfigWindow.Dispose();
         MainWindow.Dispose();
-
-        CommandManager.RemoveHandler(CommandName);
+        ParsingWindow.Dispose();
+        parser.Dispose();
+        packetHandlersHooks.Dispose();
+        
+        Service.CommandManager.RemoveHandler(CommandName);
     }
 
     private void OnCommand(string command, string args)
@@ -82,5 +99,5 @@ public sealed class Plugin : IDalamudPlugin
     }
     
     public void ToggleConfigUi() => ConfigWindow.Toggle();
-    public void ToggleMainUi() => MainWindow.Toggle();
+    public void ToggleMainUi() => ParsingWindow.Toggle();
 }
