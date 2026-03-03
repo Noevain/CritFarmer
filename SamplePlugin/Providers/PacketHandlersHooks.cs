@@ -1,19 +1,20 @@
 using Dalamud.Game.ClientState.Objects.SubKinds;
+using Dalamud.Game.ClientState.Objects.Types;
 using Dalamud.Hooking;
 using Dalamud.Utility.Signatures;
-using SamplePlugin.Game;
 using FFXIVClientStructs.FFXIV.Client.Game;
 using FFXIVClientStructs.FFXIV.Client.Game.Character;
 using FFXIVClientStructs.FFXIV.Client.Game.Object;
 using FFXIVClientStructs.FFXIV.Common.Math;
 using SamplePlugin;
+using SamplePlugin.Events;
+using SamplePlugin.Game;
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using static FFXIVClientStructs.FFXIV.Client.System.Scheduler.Resource.SchedulerResource;
 using Action = Lumina.Excel.Sheets.Action;
 using Status = Lumina.Excel.Sheets.Status;
-using SamplePlugin.Events;
-using Dalamud.Game.ClientState.Objects.Types;
 
 namespace SamplePlugin.Providers;
 
@@ -52,6 +53,29 @@ public class PacketHandlersHooks : IDisposable,IProvider
         processPacketActorControlHook.Enable();
         processPacketEffectResultHook.Enable();
         Service.Log.Debug("Hooks enabled");
+        Service.DutyState.DutyStarted += OnEncounterStart;
+        Service.DutyState.DutyRecommenced += OnEncounterStart;
+        Service.DutyState.DutyWiped += OnEncounterEnd;
+        Service.DutyState.DutyCompleted += OnEncounterEnd;
+        Service.ClientState.TerritoryChanged += OnTerritoryChange;
+        
+    }
+
+    private void OnTerritoryChange(ushort e)
+    {
+        OnNewCombatEvent?.Invoke(new CombatEvent { Timestamp = DateTime.UtcNow ,Data = new CombatEventData.ZoneChange { TerritoryType = e} });
+    }
+
+    private void OnEncounterStart(object? sender, ushort e)
+    {
+        Service.Log.Verbose($"Encounter start:{e}");
+        OnNewCombatEvent?.Invoke(new CombatEvent { Timestamp = DateTime.UtcNow, Data = new CombatEventData.EncounterStart {TerritoryType = e } });
+    }
+
+    private void OnEncounterEnd(object? sender, ushort e)
+    {
+        Service.Log.Verbose($"Encounter end:{e}");
+        OnNewCombatEvent?.Invoke(new CombatEvent { Timestamp = DateTime.UtcNow, Data = new CombatEventData.EncounterEnd { TerritoryType = e} });
     }
 
     private unsafe void ProcessPacketActionEffectDetour(
@@ -69,9 +93,6 @@ public class PacketHandlersHooks : IDisposable,IProvider
                 ActionType.Item => 0x2000000 + effectHeader->ActionId,
                 _ => effectHeader->SpellId
             };
-            Action? action = null;
-            string? source = null;
-            List<uint>? additionalStatus = null;
 
             for (var i = 0; i < effectHeader->NumTargets; i++)
             {
@@ -86,68 +107,7 @@ public class PacketHandlersHooks : IDisposable,IProvider
                     uint amount = actionEffect.Value;
                     if ((actionEffect.Param4 & 0x40) == 0x40)
                         amount += (uint)actionEffect.Param3 << 16;
-
-                    action ??= Service.DataManager.GetExcelSheet<Action>().GetRowOrDefault(actionId);
-                    source ??= casterPtr->NameString;
-
-                    switch ((ActionEffectType)actionEffect.Type)
-                    {
-                        case ActionEffectType.Miss:
-                        case ActionEffectType.Damage:
-                        case ActionEffectType.BlockedDamage:
-                        case ActionEffectType.ParriedDamage:
-                            if (additionalStatus == null)
-                            {
-                                var statusManager = casterPtr->GetStatusManager();
-                                additionalStatus = [];
-                                if (statusManager != null)
-                                {
-                                    foreach (ref var status in statusManager->Status)
-                                    {
-                                        if (status.StatusId is 1203 or 1195 or 1193 or 860 or 1715 or 2115 or 3642)
-                                            additionalStatus.Add(status.StatusId);
-                                    }
-                                }
-                            }
-                            // 1203 = Addle2
-                            // 1195 = Feint
-                            // 1193 = Reprisal
-                            //  860 = Dismantled
-                            // 1715 = Malodorous, BLU Bad Breath
-                            // 2115 = Conked, BLU Magic Hammer
-                            // 3642 = Candy Cane, BLU Candy Cane
-                            OnNewCombatEvent?.Invoke(
-                                new CombatEvent.DamageTaken
-                                {
-                                    
-                                    Snapshot = p.Snapshot(true, additionalStatus),
-                                    Source = source,
-                                    SourceId = actionTargetId,
-                                    Amount = amount,
-                                    Action = action?.ActionCategory.RowId == 1 ? "Auto-attack" : action?.Name.ExtractText() ?? "",
-                                    Icon = action?.Icon,
-                                    Crit = (actionEffect.Param0 & 0x20) == 0x20,
-                                    DirectHit = (actionEffect.Param0 & 0x40) == 0x40,
-                                    DamageType = (DamageType)(actionEffect.Param1 & 0xF),
-                                    Parried = actionEffect.Type == (int)ActionEffectType.ParriedDamage,
-                                    Blocked = actionEffect.Type == (int)ActionEffectType.BlockedDamage,
-                                    DisplayType = (ActionType)effectHeader->ActionType
-                                });
-                            break;
-                        case ActionEffectType.Heal:
-                            OnNewCombatEvent?.Invoke(
-                                new CombatEvent.Healed
-                                {
-                                    Snapshot = p.Snapshot(true),
-                                    Source = source,
-                                    SourceId = actionTargetId,
-                                    Amount = amount,
-                                    Action = action?.Name.ExtractText() ?? "",
-                                    Icon = action?.Icon,
-                                    Crit = (actionEffect.Param1 & 0x20) == 0x20
-                                });
-                            break;
-                    }
+                    EffectToCombatEvent(casterEntityId, casterPtr, effectHeader, actionId, p, actionEffect, amount);
                 }
             }
         }
@@ -159,7 +119,129 @@ public class PacketHandlersHooks : IDisposable,IProvider
 
     }
 
-    private void ProcessPacketActorControlDetour(
+    private unsafe void EffectToCombatEvent(uint casterEntityId, Character* casterPtr, ActionEffectHandler.Header* effectHeader, uint actionId,IBattleChara p, ActionEffectHandler.Effect actionEffect, uint amount)
+    {
+        Action? action = null;
+        string? source = null;
+        ulong? sourceGameObjectId = null;
+        uint? sourceEntityId = null;
+        uint? sourceBaseId = null;
+        ObjectKind? sourceObjectKind = null;
+        List<uint>? additionalStatus = null;
+        
+        string? target = null;
+        uint? targetEntityId = null;
+        ulong? targetGameObjectId = null;
+        uint? targetBaseId = null;
+        ObjectKind? targetObjectKind = null;
+        action ??= Service.DataManager.GetExcelSheet<Action>().GetRowOrDefault(actionId);
+        source ??= casterPtr->NameString;
+        sourceEntityId ??= casterEntityId;
+        sourceGameObjectId ??= casterPtr->GetGameObjectId().Id;
+        sourceBaseId ??= casterPtr->BaseId;
+        sourceObjectKind ??= casterPtr->ObjectKind;
+        
+        target ??= p.Name.TextValue;
+        targetEntityId ??= p.EntityId;
+        targetGameObjectId ??= ((BattleChara*)p.Address)->GetGameObjectId().Id;
+        targetBaseId ??= ((BattleChara*)p.Address)->BaseId;
+        targetObjectKind ??= (ObjectKind)p.ObjectKind;//
+        switch ((ActionEffectType)actionEffect.Type)
+        {
+            case ActionEffectType.Miss:
+            case ActionEffectType.Damage:
+            case ActionEffectType.BlockedDamage:
+            case ActionEffectType.ParriedDamage:
+                if (additionalStatus == null)
+                {
+                    var statusManager = casterPtr->GetStatusManager();
+                    additionalStatus = [];
+                    if (statusManager != null)
+                    {
+                        foreach (ref var status in statusManager->Status)
+                        {
+                            if (status.StatusId is 1203 or 1195 or 1193 or 860 or 1715 or 2115 or 3642)
+                                additionalStatus.Add(status.StatusId);
+                        }
+                    }
+                }
+                // 1203 = Addle2
+                // 1195 = Feint
+                // 1193 = Reprisal
+                //  860 = Dismantled
+                // 1715 = Malodorous, BLU Bad Breath
+                // 2115 = Conked, BLU Magic Hammer
+                // 3642 = Candy Cane, BLU Candy Cane
+                OnNewCombatEvent?.Invoke(
+                    new CombatEvent
+                    {
+                        Timestamp = DateTime.UtcNow,
+                        SourceSnapshot = Extensions.CreateSnapshot((BattleChara*)casterPtr),
+                        TargetSnapshot = p.Snapshot(true,additionalStatus),
+                        Source = new Entity
+                        { 
+                        GameObjectId = sourceGameObjectId ?? 0,
+                          BaseId = sourceBaseId,
+                          Name = source,
+                          Kind = sourceObjectKind ?? ObjectKind.None
+                        },
+                        Target = new Entity 
+                        { 
+                        GameObjectId = targetGameObjectId ?? 0,
+                        BaseId = targetBaseId,
+                        Name = target,
+                        Kind = targetObjectKind ?? ObjectKind.None
+                        },
+                        Data = new CombatEventData.DamageTaken
+                        {
+                            Amount = amount,
+                            Action = action?.ActionCategory.RowId == 1 ? "Auto-attack" : action?.Name.ExtractText() ?? "",
+                            ActionId = actionId,
+                            Icon = action?.Icon,
+                            Crit = (actionEffect.Param0 & 0x20) == 0x20,
+                            DirectHit = (actionEffect.Param0 & 0x40) == 0x40,
+                            DamageType = (DamageType)(actionEffect.Param1 & 0xF),
+                            Parried = actionEffect.Type == (int)ActionEffectType.ParriedDamage,
+                            Blocked = actionEffect.Type == (int)ActionEffectType.BlockedDamage,
+                            DisplayType = (ActionType)effectHeader->ActionType
+                        }
+                    });
+                break;
+            case ActionEffectType.Heal:
+                OnNewCombatEvent?.Invoke(
+                    new CombatEvent
+                    {
+                        Timestamp = DateTime.UtcNow,
+                        SourceSnapshot = Extensions.CreateSnapshot((BattleChara*)casterPtr),
+                        TargetSnapshot = p.Snapshot(true,additionalStatus),
+                        Source = new Entity
+                        {
+                            GameObjectId = sourceGameObjectId ?? 0,
+                            BaseId = sourceBaseId,
+                            Name = source,
+                            Kind = sourceObjectKind ?? ObjectKind.None
+                        },
+                        Target = new Entity
+                        {
+                            GameObjectId = targetGameObjectId ?? 0,
+                            BaseId = targetBaseId,
+                            Name = target,
+                            Kind = targetObjectKind ?? ObjectKind.None
+                        },
+                        Data = new CombatEventData.Healed
+                        {
+                            Amount = amount,
+                            ActionId = actionId,
+                            Action = action?.Name.ExtractText() ?? "",
+                            Icon = action?.Icon,
+                            Crit = (actionEffect.Param1 & 0x20) == 0x20
+                        }
+                    });
+                break;
+        }
+    }
+
+    private unsafe void ProcessPacketActorControlDetour(
         uint entityId, uint category, uint param1, uint param2, uint param3, uint param4, uint param5, uint param6, uint param7, uint param8, ulong targetId,
         byte param9)
     {
@@ -169,38 +251,131 @@ public class PacketHandlersHooks : IDisposable,IProvider
 
             if (Service.ObjectTable.SearchById(entityId) is not IBattleChara p)
                 return;
+            ActorControlToCombatEvent(entityId, category, param1, param2, param4, p);//most param in Actor control are case specific 
+        }
+        catch (Exception e)
+        {
+            Service.Log.Error(e, "Caught unexpected exception");
+        }
+    }
 
-            switch ((ActorControlCategory)category)
-            {
-                case ActorControlCategory.DoT: OnNewCombatEvent?.Invoke(new CombatEvent.DoT { Snapshot = p.Snapshot(), Amount = param2 }); break;
-                case ActorControlCategory.HoT:
-                    if (param1 != 0)
+    private unsafe void ActorControlToCombatEvent(uint entityId, uint category, uint param1, uint param2, uint param4, IBattleChara p)
+    {
+        var sourceName = p.Name.TextValue;
+        var sourceEntityId = entityId;
+        var sourceGameObjectId = ((BattleChara*)p.Address)->GetGameObjectId().Id;
+        var sourceBaseId = ((BattleChara*)p.Address)->BaseId;
+        var sourceObjectKind = ((BattleChara*)p.Address)->ObjectKind;
+        switch ((ActorControlCategory)category)
+        {
+            case ActorControlCategory.DoT:
+                OnNewCombatEvent?.Invoke(new CombatEvent
+                {
+                    Timestamp = DateTime.UtcNow,
+                    SourceSnapshot = p.Snapshot(),
+                    Source = new Entity
                     {
-                        var sourceName = Service.ObjectTable.SearchById(entityId)?.Name.TextValue;
-                        var status = Service.DataManager.GetExcelSheet<Status>().GetRowOrDefault(param1);
-                        OnNewCombatEvent?.Invoke(
-                            new CombatEvent.Healed
+                        GameObjectId = sourceGameObjectId,
+                        BaseId = sourceBaseId,
+                        Name = sourceName,
+                        Kind = sourceObjectKind
+                    },
+                    Data = new CombatEventData.DoT
+                    {
+                        Amount = param2
+                    }
+                });
+                break;
+            case ActorControlCategory.HoT:
+                if (param1 != 0)
+                {
+                    var status = Service.DataManager.GetExcelSheet<Status>().GetRowOrDefault(param1);
+                    OnNewCombatEvent?.Invoke(
+                        new CombatEvent
+                        {
+                            Timestamp = DateTime.UtcNow,
+                            SourceSnapshot = p.Snapshot(),
+                            Source = new Entity
                             {
-                                Snapshot = p.Snapshot(),
-                                Source = sourceName,
-                                SourceId = entityId,
+                                GameObjectId = sourceGameObjectId,
+                                BaseId = sourceBaseId,
+                                Name = sourceName,
+                                Kind = sourceObjectKind
+                            },
+                            Data = new CombatEventData.Healed
+                            {
                                 Amount = param2,
+                                ActionId = 0,
                                 Action = status?.Name.ExtractText() ?? "",
-                                Icon = status?.Icon,
+                                Icon = (ushort?)(status?.Icon),
                                 Crit = param4 == 1
-                            });
-                    }
-                    else
+                            }
+                        });
+                }
+                else
+                {
+                    OnNewCombatEvent?.Invoke(new CombatEvent
                     {
-                        OnNewCombatEvent?.Invoke(new CombatEvent.HoT { Snapshot = p.Snapshot(), Amount = param2 });
-                    }
+                        Timestamp = DateTime.UtcNow,
+                        SourceSnapshot = p.Snapshot(),
+                        Source = new Entity
+                        {
+                            GameObjectId = sourceGameObjectId,
+                            BaseId = sourceBaseId,
+                            Name = sourceName,
+                            Kind = sourceObjectKind
+                        },
+                        Data = new CombatEventData.HoT
+                        {
+                            Amount = param2
+                        }
+                    });
+                }
 
-                    break;
-                case ActorControlCategory.Death:
+                break;
+            case ActorControlCategory.Death:
+                {
+                    OnNewCombatEvent?.Invoke(new CombatEvent
                     {
-                        OnNewCombatEvent?.Invoke(new CombatEvent.Death { Source = p.Name.TextValue,Snapshot = p.Snapshot() });
-                        break;
-                    }
+                        Timestamp = DateTime.UtcNow,
+                        Source = new Entity
+                        {
+                            GameObjectId = sourceGameObjectId,
+                            BaseId = sourceBaseId,
+                            Name = sourceName,
+                            Kind = sourceObjectKind
+                        },
+                        SourceSnapshot = p.Snapshot(),
+                        Data = new CombatEventData.Death { }
+                    });
+                    break;
+                }
+        }
+    }
+
+    private unsafe void ProcessPacketEffectResultDetour(uint targetId, IntPtr actionIntegrityData, byte isReplay)
+    {
+        processPacketEffectResultHook.Original(targetId, actionIntegrityData, isReplay);
+
+        try
+        {
+            var message = (AddStatusEffect*)actionIntegrityData;
+
+            if (Service.ObjectTable.SearchById(targetId) is not IBattleChara p)
+                return;
+
+            var effects = (StatusEffectAddEntry*)message->Effects;
+            var effectCount = Math.Min(message->EffectCount, 4u);
+            for (uint j = 0; j < effectCount; j++)
+            {
+                var effect = effects[j];
+                var effectId = effect.EffectId;
+                if (effectId <= 0)
+                    continue;
+                // negative durations will remove effect
+                if (effect.Duration < 0)
+                    continue;
+                StatusEffectToCombatEvent(targetId, p, effect, effectId);
             }
         }
         catch (Exception e)
@@ -208,18 +383,55 @@ public class PacketHandlersHooks : IDisposable,IProvider
             Service.Log.Error(e, "Caught unexpected exception");
         }
     }
-        
-    private unsafe void ProcessPacketEffectResultDetour(uint targetId, IntPtr actionIntegrityData, byte isReplay)
-    {
-        processPacketEffectResultHook.Original(targetId, actionIntegrityData, isReplay);
 
-        
+    private unsafe void StatusEffectToCombatEvent(uint targetId, IBattleChara p, StatusEffectAddEntry effect, ushort effectId)
+    {
+        BattleChara* sourceActor = (BattleChara*)(Service.ObjectTable.SearchById(effect.SourceActorId)?.Address);
+        if (sourceActor == null)
+            return;
+         ulong sourceGameObjectId = sourceActor->GetGameObjectId().Id;
+         uint sourceEntityId = sourceActor->EntityId;
+        uint sourceBaseId = sourceActor->BaseId;
+        string source = sourceActor->NameString;
+        ObjectKind sourceObjectKind = sourceActor->ObjectKind;
+
+        var status = Service.DataManager.GetExcelSheet<Status>().GetRowOrDefault(effectId);
+        var targetIdStr = Service.ObjectTable.SearchById(targetId)?.Name.TextValue;
+        OnNewCombatEvent?.Invoke(
+            new Events.CombatEvent
+            {
+                Timestamp = DateTime.UtcNow,
+                SourceSnapshot = p.Snapshot(),
+                Source = new Entity
+                {
+                    GameObjectId = sourceGameObjectId,
+                    BaseId = sourceBaseId,
+                    Name = source,
+                    Kind = sourceObjectKind
+                },
+                Data = new CombatEventData.StatusEffect
+                {
+
+                    Id = effectId,
+                    StackCount = effect.StackCount <= status?.MaxStacks ? effect.StackCount : 0u,
+                    Icon = (ushort?)(status?.Icon),
+                    Status = status?.Name.ExtractText(),
+                    Description = status?.Description.ExtractText(),
+                    Category = (Events.StatusCategory)(status?.StatusCategory ?? 0),
+                    Duration = effect.Duration
+                }
+            });
     }
 
-    
 
     public void Dispose()
     {
+
+        Service.DutyState.DutyStarted -= OnEncounterStart;
+        Service.DutyState.DutyRecommenced -= OnEncounterStart;
+        Service.DutyState.DutyWiped -= OnEncounterEnd;
+        Service.DutyState.DutyCompleted -= OnEncounterEnd;
+        Service.ClientState.TerritoryChanged -= OnTerritoryChange;
         processPacketActionEffectHook.Dispose();
         processPacketEffectResultHook.Dispose();
         processPacketActorControlHook.Dispose();
